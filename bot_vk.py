@@ -472,7 +472,8 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
         text = (
             "Здоровье и стройность Faberlic\n\n"
             "Wellness-коктейли, БАДы, программы стройности.\n\n"
-            f"Посмотреть каталог:\n{links.get('catalog_health', links.get('catalog', ''))}"
+            f"◾ Здоровье и стройность:\n{links.get('catalog_health', links.get('catalog', ''))}\n\n"
+            f"◾ Восточный секрет (японская медицина, добавки):\n{links.get('catalog_eastern', links.get('catalog', ''))}"
         )
         await send_with_photo(
             bot, vk_id, "health_main", text,
@@ -487,7 +488,8 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
         text = (
             "Здоровье и стройность Faberlic\n\n"
             "Wellness-коктейли, БАДы, программы стройности.\n\n"
-            f"Посмотреть каталог:\n{links.get('catalog_health', links.get('catalog', ''))}"
+            f"◾ Здоровье и стройность:\n{links.get('catalog_health', links.get('catalog', ''))}\n\n"
+            f"◾ Восточный секрет (японская медицина, добавки):\n{links.get('catalog_eastern', links.get('catalog', ''))}"
         )
         await send_with_photo(
             bot, vk_id, "health_main", text,
@@ -521,7 +523,8 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
             f"◾ ПАРФЮМЕРИЯ И АРОМАТЫ:\n{links.get('catalog_perfume', links.get('catalog', ''))}\n\n"
             f"◾ ВСЁ ДЛЯ МАКИЯЖА:\n{links.get('catalog_makeup', links.get('catalog', ''))}\n\n"
             f"◾ НОВИНКИ:\n{links.get('catalog_sets', links.get('catalog', ''))}\n\n"
-            f"👉 ПОЛНЫЙ КАТАЛОГ:\n{links.get('catalog', '')}"
+            f"📖 КАТАЛОГ FABERLIC:\n{links.get('catalog', '')}\n\n"
+            f"📖 КАТАЛОГ AVON:\n{links.get('catalog_avon', links.get('catalog', ''))}"
         )
         await message.answer(
             catalog_text,

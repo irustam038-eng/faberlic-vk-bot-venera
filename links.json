@@ -1,11 +1,13 @@
 {
-  "reg": "https://faberlic.com/register?sponsornumber=739945401&lang=ru&r=1000034210371",
-  "catalog": "https://kabinet-faberlic.com/catalogs/catalog-faberlic-6-2026-russia/#p=340",
+  "reg": "https://clck.ru/3TSfhb",
+  "catalog": "https://clck.ru/3TQgSf",
+  "catalog_avon": "https://clck.ru/3TQgU4",
   "catalog_care": "https://faberlic.com/ru/ru/category/13.02.01.00.00?sponsornumber=722761514&page=0",
   "catalog_home": "https://faberlic.com/ru/ru/category/05.01.02.00.00?sponsornumber=722761514&page=0",
   "catalog_health": "https://faberlic.com/ru/ru/category/06.13.03.00.00?sponsornumber=722761514&page=0",
+  "catalog_eastern": "https://clck.ru/3TQgWy",
   "catalog_perfume": "https://faberlic.com/ru/ru/category/02.01.01.00.00?sponsornumber=722761514&page=0",
   "catalog_makeup": "https://faberlic.com/ru/ru/category/12.01.00.00.00?sponsornumber=722761514&page=0",
-  "catalog_sets": "https://faberlic.com/ru/ru/tag/new?sponsornumber=722761514&page=0",
+  "catalog_sets": "https://clck.ru/3TQgaw",
   "venera_vk": "https://vk.com/id443815960"
 }
