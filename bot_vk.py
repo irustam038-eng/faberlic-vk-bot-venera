@@ -522,7 +522,7 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
             f"◾ ЗДОРОВЬЕ И СТРОЙНОСТЬ:\n{links.get('catalog_health', links.get('catalog', ''))}\n\n"
             f"◾ ПАРФЮМЕРИЯ И АРОМАТЫ:\n{links.get('catalog_perfume', links.get('catalog', ''))}\n\n"
             f"◾ ВСЁ ДЛЯ МАКИЯЖА:\n{links.get('catalog_makeup', links.get('catalog', ''))}\n\n"
-            f"◾ НОВИНКИ:\n{links.get('catalog_sets', links.get('catalog', ''))}\n\n"
+            f"◾ НОВИНКИ FABERLIC:\n{links.get('catalog_sets', links.get('catalog', ''))}\n\n"
             f"📖 КАТАЛОГ FABERLIC:\n{links.get('catalog', '')}\n\n"
             f"📖 КАТАЛОГ AVON:\n{links.get('catalog_avon', links.get('catalog', ''))}"
         )
