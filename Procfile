@@ -1,1 +1,1 @@
-worker: python bot_vk.py
+worker: python -OO bot_vk.py

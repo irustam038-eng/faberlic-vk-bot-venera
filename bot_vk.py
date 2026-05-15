@@ -1,5 +1,7 @@
 import asyncio
 import csv
+import ctypes
+import gc
 import json
 import logging
 import os
@@ -37,7 +39,6 @@ if not VK_TOKEN:
     raise RuntimeError("VK_TOKEN не задан в .env")
 
 VK_GROUP_ID = os.getenv("VK_GROUP_ID", "")
-
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
 BASE_DIR = Path(__file__).parent
@@ -78,66 +79,114 @@ DEFAULT_TEXTS = {
 }
 
 
-# ─── JSON helpers ───────────────────────────────────────────────────────────────
+# ─── Кэши (сбрасываются при сохранении, не читаем файлы на каждый запрос) ────
+
+_links_cache: dict | None = None
+_texts_cache: dict | None = None
+_admin_ids_cache: list[int] | None = None
+_uploader: PhotoMessageUploader | None = None
+
 
 def load_links() -> dict:
+    global _links_cache
+    if _links_cache is not None:
+        return _links_cache
     if not LINKS_FILE.exists():
-        save_links(DEFAULT_LINKS)
-        return DEFAULT_LINKS.copy()
+        _links_cache = DEFAULT_LINKS.copy()
+        _flush_links(_links_cache)
+        return _links_cache
     with open(LINKS_FILE, encoding="utf-8") as f:
-        return json.load(f)
+        _links_cache = json.load(f)
+    return _links_cache
 
 
 def save_links(data: dict) -> None:
+    global _links_cache
+    _links_cache = data
+    _flush_links(data)
+
+
+def _flush_links(data: dict) -> None:
     with open(LINKS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def load_texts() -> dict:
+    global _texts_cache
+    if _texts_cache is not None:
+        return _texts_cache
     if not TEXTS_FILE.exists():
-        save_texts(DEFAULT_TEXTS)
-        return DEFAULT_TEXTS.copy()
+        _texts_cache = DEFAULT_TEXTS.copy()
+        _flush_texts(_texts_cache)
+        return _texts_cache
     with open(TEXTS_FILE, encoding="utf-8") as f:
         data = json.load(f)
     for k, v in DEFAULT_TEXTS.items():
         data.setdefault(k, v)
-    return data
+    _texts_cache = data
+    return _texts_cache
 
 
 def save_texts(data: dict) -> None:
+    global _texts_cache
+    _texts_cache = data
+    _flush_texts(data)
+
+
+def _flush_texts(data: dict) -> None:
     with open(TEXTS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def load_admin_ids() -> list[int]:
+    global _admin_ids_cache
+    if _admin_ids_cache is not None:
+        return _admin_ids_cache
     extra: list[int] = []
     if ADMINS_FILE.exists():
         with open(ADMINS_FILE, encoding="utf-8") as f:
             extra = json.load(f)
-    return list(set(ADMIN_IDS + extra))
+    _admin_ids_cache = list(set(ADMIN_IDS + extra))
+    return _admin_ids_cache
 
 
 def save_admin_ids_extra(ids: list[int]) -> None:
+    global _admin_ids_cache
+    _admin_ids_cache = None  # сбросить кэш — пересчитается при следующем вызове
     with open(ADMINS_FILE, "w", encoding="utf-8") as f:
         json.dump(ids, f, ensure_ascii=False, indent=2)
 
 
-# FSM хранится в SQLite (таблица user_states)
+def get_uploader() -> PhotoMessageUploader:
+    global _uploader
+    if _uploader is None:
+        _uploader = PhotoMessageUploader(bot.api)
+    return _uploader
+
+
+# ─── Фоновый сборщик мусора — каждые 5 минут возвращает память ОС ────────────
+
+async def _memory_trimmer():
+    await asyncio.sleep(60)
+    while True:
+        gc.collect()
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+        await asyncio.sleep(300)
+
+
+# FSM хранится в SQLite
 get_state = bot_db.get_state
 set_state = bot_db.set_state
 get_state_data = bot_db.get_state_data
 clear_state = bot_db.clear_state
 
 
-# ─── Keyboard builder ───────────────────────────────────────────────────────────
+# ─── Keyboard builder ──────────────────────────────────────────────────────────
 
 def build_keyboard(*rows) -> str:
-    """
-    rows — кортежи вида:
-      [ ("текст", "payload"), ... ]  — одна строка кнопок
-    Если payload начинается с "url:" — кнопка-ссылка OpenLink.
-    Возвращает JSON-строку клавиатуры для vkbottle.
-    """
     kb = Keyboard(one_time=False, inline=False)
     for row_idx, row in enumerate(rows):
         for item in row:
@@ -147,22 +196,19 @@ def build_keyboard(*rows) -> str:
             if payload.startswith("url:"):
                 kb.add(OpenLink(payload[4:], label))
             else:
-                kb.add(Text(label, payload={"cmd": payload}), color=color)
+                kb.add(Text(label, payload={"cmd": payload}), color)
         if row_idx < len(rows) - 1:
             kb.row()
     return kb.get_json()
 
 
-# ─── Цвета кнопок ───────────────────────────────────────────────────────────────
-
-W = KeyboardButtonColor.PRIMARY    # синяя
-S = KeyboardButtonColor.SECONDARY  # белая
-N = KeyboardButtonColor.NEGATIVE   # красная
-P = KeyboardButtonColor.POSITIVE   # зелёная
+W = KeyboardButtonColor.PRIMARY
+S = KeyboardButtonColor.SECONDARY
+N = KeyboardButtonColor.NEGATIVE
+P = KeyboardButtonColor.POSITIVE
 
 
 def _venera_btn_rows(links: dict) -> list:
-    """Строки с кнопкой Написать Венере. Если ссылка не задана — не добавляем."""
     url = links.get("venera_vk", "")
     if url:
         return [[("Написать Венере", f"url:{url}", W)]]
@@ -199,30 +245,34 @@ def stage_label(stage: str) -> str:
     }.get(stage, stage)
 
 
-# ─── Отправка с фото ─────────────────────────────────────────────────────────────
+# ─── Отправка с фото (используем синглтон uploader) ──────────────────────────
 
 async def send_with_photo(bot: Bot, peer_id: int, photo_name: str, text: str, keyboard: str = None):
-    """Отправляет сообщение с фото из media/. Если файла нет — просто текст."""
     path = MEDIA_DIR / f"{photo_name}.jpg"
     kwargs = {"peer_id": peer_id, "message": text}
     if keyboard:
         kwargs["keyboard"] = keyboard
     if path.exists():
         try:
-            uploader = PhotoMessageUploader(bot.api)
-            photo = await uploader.upload(str(path))
+            photo = await get_uploader().upload(str(path))
             kwargs["attachment"] = photo
         except Exception as e:
             log.warning("Photo upload failed (%s): %s", photo_name, e)
     await bot.api.messages.send(random_id=int(time.time() * 1000) % 2147483647, **kwargs)
 
 
-# ─── Инициализация бота ──────────────────────────────────────────────────────────
+# ─── Инициализация бота ───────────────────────────────────────────────────────
 
 bot = Bot(token=VK_TOKEN)
 
 
-# ─── /start и приветствие ───────────────────────────────────────────────────────
+@bot.on.startup()
+async def on_startup():
+    asyncio.create_task(_memory_trimmer())
+    log.info("Memory trimmer started")
+
+
+# ─── /start и приветствие ─────────────────────────────────────────────────────
 
 @bot.on.message(text=["начать", "start", "/start", "привет", "Начать", "Start"])
 async def cmd_start(message: Message):
@@ -238,8 +288,7 @@ async def cmd_start(message: Message):
     clear_state(vk_id)
 
     if is_new:
-        admin_ids = load_admin_ids()
-        for admin_id in admin_ids:
+        for admin_id in load_admin_ids():
             try:
                 await bot.api.messages.send(
                     peer_id=admin_id,
@@ -263,7 +312,7 @@ async def _send_main_menu(vk_id: int, name: str):
     await send_with_photo(bot, vk_id, "venera", text, main_keyboard(is_admin))
 
 
-# ─── Основной роутер входящих сообщений ─────────────────────────────────────────
+# ─── Основной роутер ──────────────────────────────────────────────────────────
 
 @bot.on.message()
 async def message_router(message: Message):
@@ -271,7 +320,6 @@ async def message_router(message: Message):
     payload = message.payload
     text_raw = (message.text or "").strip()
 
-    # Извлекаем cmd из payload (vkbottle передаёт payload как строку JSON)
     cmd = None
     if payload:
         if isinstance(payload, dict):
@@ -284,7 +332,7 @@ async def message_router(message: Message):
 
     state = get_state(vk_id)
 
-    # ── FSM-обработка ────────────────────────────────────────────────────────────
+    # ── FSM ──────────────────────────────────────────────────────────────────
 
     if state == "adm_waiting_broadcast":
         if vk_id not in load_admin_ids():
@@ -356,24 +404,20 @@ async def message_router(message: Message):
         )
         return
 
-    # ── Маршрутизация по payload ────────────────────────────────────────────────
+    # ── Payload ───────────────────────────────────────────────────────────────
 
     if cmd:
         await _handle_cmd(vk_id, cmd, message)
         return
 
-    # ── Текстовые команды ───────────────────────────────────────────────────────
+    # ── Текстовые команды ─────────────────────────────────────────────────────
 
     low = text_raw.lower()
     if low in ("/admin", "admin", "настройки"):
         if vk_id in load_admin_ids():
-            await message.answer(
-                "Настройки бота. Выбери действие:",
-                keyboard=admin_keyboard(),
-            )
+            await message.answer("Настройки бота. Выбери действие:", keyboard=admin_keyboard())
         return
 
-    # Fallback — главное меню
     user = bot_db.get_user(vk_id)
     name = (user or {}).get("name") or "друг"
     welcome = load_texts().get("welcome_text", DEFAULT_TEXTS["welcome_text"])
@@ -384,12 +428,11 @@ async def message_router(message: Message):
     )
 
 
-# ─── Центральный обработчик команд из payload ───────────────────────────────────
+# ─── Центральный обработчик команд ────────────────────────────────────────────
 
 async def _handle_cmd(vk_id: int, cmd: str, message: Message):
     links = load_links()
 
-    # ── Главное меню ──
     if cmd == "back_main":
         user = bot_db.get_user(vk_id)
         name = (user or {}).get("name") or "друг"
@@ -401,8 +444,8 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
             await message.answer("Настройки бота:", keyboard=admin_keyboard())
         return
 
-    # ── Гайд по чистоте ──
-    if cmd == "clean_main":
+    # back_* алиасы указывают на те же экраны — не дублируем код
+    if cmd in ("clean_main", "back_clean"):
         text = (
             "Косметика для дома Faberlic\n\n"
             "Средства для стирки, уборки кухни, ванной.\n"
@@ -418,24 +461,7 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
         )
         return
 
-    if cmd == "back_clean":
-        text = (
-            "Косметика для дома Faberlic\n\n"
-            "Средства для стирки, уборки кухни, ванной.\n"
-            "Экологичные составы, концентраты.\n\n"
-            f"Посмотреть каталог:\n{links.get('catalog_home', links.get('catalog', ''))}"
-        )
-        await send_with_photo(
-            bot, vk_id, "clean_main", text,
-            build_keyboard(
-                [("Хочу зарегистрироваться", f"url:{links['reg']}", P)],
-                [("Назад", "back_main", S)],
-            ),
-        )
-        return
-
-    # ── Уход за собой ──
-    if cmd == "care_main":
+    if cmd in ("care_main", "back_care"):
         text = (
             "Уход за собой Faberlic\n\n"
             "Уход за лицом, телом, волосами — всё в одном месте.\n"
@@ -451,24 +477,7 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
         )
         return
 
-    if cmd == "back_care":
-        text = (
-            "Уход за собой Faberlic\n\n"
-            "Уход за лицом, телом, волосами — всё в одном месте.\n"
-            "Кремы, сыворотки, маски, гели для душа.\n\n"
-            f"Посмотреть каталог:\n{links.get('catalog_care', links.get('catalog', ''))}"
-        )
-        await send_with_photo(
-            bot, vk_id, "care_main", text,
-            build_keyboard(
-                [("Хочу зарегистрироваться", f"url:{links['reg']}", P)],
-                [("Назад", "back_main", S)],
-            ),
-        )
-        return
-
-    # ── Здоровье ──
-    if cmd == "health_main":
+    if cmd in ("health_main", "back_health"):
         text = (
             "Здоровье и стройность Faberlic\n\n"
             "Wellness-коктейли, БАДы, программы стройности.\n\n"
@@ -484,23 +493,6 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
         )
         return
 
-    if cmd == "back_health":
-        text = (
-            "Здоровье и стройность Faberlic\n\n"
-            "Wellness-коктейли, БАДы, программы стройности.\n\n"
-            f"◾ Здоровье и стройность:\n{links.get('catalog_health', links.get('catalog', ''))}\n\n"
-            f"◾ Восточный секрет (японская медицина, добавки):\n{links.get('catalog_eastern', links.get('catalog', ''))}"
-        )
-        await send_with_photo(
-            bot, vk_id, "health_main", text,
-            build_keyboard(
-                [("Хочу зарегистрироваться", f"url:{links['reg']}", P)],
-                [("Назад", "back_main", S)],
-            ),
-        )
-        return
-
-    # ── Подарок -20% ──
     if cmd == "gift_btn":
         text = load_texts().get("gift_promo", DEFAULT_TEXTS["gift_promo"])
         await send_with_photo(
@@ -513,7 +505,6 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
         )
         return
 
-    # ── Каталог ──
     if cmd == "catalog_btn":
         catalog_text = (
             "Выбери раздел каталога:\n\n"
@@ -532,7 +523,6 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
         )
         return
 
-    # ── Задать вопрос ──
     if cmd in ("ask_btn", "ask_venera"):
         await message.answer(
             "Напишу лично — отвечу на все вопросы!\n\n"
@@ -544,7 +534,6 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
         )
         return
 
-    # ── want_* — флоу регистрации ──
     want_cmds = {
         "want_laundry", "want_kitchen", "want_bath",
         "want_face", "want_body", "want_hair", "want_hygiene",
@@ -583,7 +572,8 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
         )
         return
 
-    # ── Админ-панель ──
+    # ── Админ-панель ──────────────────────────────────────────────────────────
+
     if cmd == "adm_back":
         if vk_id not in load_admin_ids():
             return
@@ -595,8 +585,7 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
         if vk_id not in load_admin_ids():
             return
         await message.answer(
-            "Мои клиенты\n\n"
-            "Список людей, которые написали твоему боту.",
+            "Мои клиенты\n\nСписок людей, которые написали твоему боту.",
             keyboard=build_keyboard(
                 [("Последние 10 клиентов", "adm_leads_view", S)],
                 [("Скачать всех (CSV)", "adm_export", S)],
@@ -688,8 +677,7 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
         if vk_id not in load_admin_ids():
             return
         await message.answer(
-            "Тексты в боте\n\n"
-            "Ты можешь поменять что бот говорит клиентам.",
+            "Тексты в боте\n\nТы можешь поменять что бот говорит клиентам.",
             keyboard=build_keyboard(
                 [("Изменить текст приветствия", "adm_edit_welcome", S)],
                 [("Изменить текст акции/подарка", "adm_edit_gift", S)],
@@ -787,11 +775,17 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
                     code = getattr(e, "error_code", None)
                     if code in (901, 902):
                         bot_db.mark_blocked(uid)
-                        log.info("Broadcast: user %s blocked (code %s), marked in DB", uid, code)
+                        log.info("Broadcast: user %s blocked (code %s)", uid, code)
                     else:
                         log.warning("Broadcast error for %s: %s", uid, e)
                     fail += 1
                 await asyncio.sleep(0.05)
+            # После рассылки — принудительная очистка памяти
+            gc.collect()
+            try:
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass
             try:
                 await bot.api.messages.send(
                     peer_id=vk_id,
@@ -813,8 +807,7 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
             for aid in all_ids
         )
         await message.answer(
-            f"Мои помощники\n\n"
-            f"Сейчас имеют доступ:\n{ids_text}",
+            f"Мои помощники\n\nСейчас имеют доступ:\n{ids_text}",
             keyboard=build_keyboard(
                 [("Добавить помощника", "adm_add_admin", S)],
                 [("Убрать помощника", "adm_remove_admin", S)],
@@ -850,10 +843,7 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
             return
         rows_kb = [[("Убрать: " + str(aid), f"adm_del_admin_{aid}", N)] for aid in extra]
         rows_kb.append([("Назад", "adm_admins", S)])
-        await message.answer(
-            "Выбери кого убрать:",
-            keyboard=build_keyboard(*rows_kb),
-        )
+        await message.answer("Выбери кого убрать:", keyboard=build_keyboard(*rows_kb))
         return
 
     if cmd.startswith("adm_del_admin_"):
@@ -896,7 +886,7 @@ async def _handle_cmd(vk_id: int, cmd: str, message: Message):
         return
 
 
-# ─── Запуск ──────────────────────────────────────────────────────────────────────
+# ─── Запуск ───────────────────────────────────────────────────────────────────
 
 bot_db.init()
 load_links()
